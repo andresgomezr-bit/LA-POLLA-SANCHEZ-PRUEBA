@@ -132,7 +132,7 @@ const PUNTOS_DEFAULT = {
 // GENERADORES DE PARTIDOS
 // ══════════════════════════════════════════════
 function generarGrupos() {
-  // PRUEBA: fechas en mayo 2026 (pasado) — todos siempre disponibles
+  // PRUEBA: fechas en mayo 2026 — todos siempre disponibles
   const H = [
     {grupo:"A",local:"México",visitante:"Sudáfrica",fecha:"2026-05-01T19:00:00Z"},
     {grupo:"A",local:"Corea del Sur",visitante:"República Checa",fecha:"2026-05-01T22:00:00Z"},
@@ -462,6 +462,23 @@ function App() {
 
   function salir() { setUser(null); setPan("login"); }
 
+  function borrarPronsJugador(email) {
+    const key = FB.emailKey(email);
+    // Borrar todos los pronósticos cuya clave empiece con el emailKey del jugador
+    FB.get("prons").then(todosLosProns => {
+      if (!todosLosProns) return;
+      const updates = {};
+      Object.keys(todosLosProns).forEach(k => {
+        if (k.startsWith(key + "_")) updates[k] = null;
+      });
+      if (Object.keys(updates).length > 0) {
+        db.ref("prons").update(updates);
+      }
+    });
+    // Borrar especiales del jugador
+    FB.set("esp/" + key, null);
+  }
+
   function recuperarClave(email, callback) {
     const key = FB.emailKey(email);
     FB.get("usuarios/"+key).then(u => {
@@ -482,6 +499,88 @@ function App() {
 
   function guardarRes(pid, d) {
     FB.set(`results/${pid}`, d);
+    // Propagar ganador automáticamente al siguiente partido
+    if (d.ganadorFinal) {
+      const partido = partsTodos.find(p=>p.id===pid);
+      if (!partido) return;
+      const ganadorNombre = d.ganadorFinal==="L" ? partido.local : partido.visitante;
+      propagarGanador(pid, ganadorNombre, partido.fase, partido.partido);
+    }
+  }
+
+  function propagarGanador(pid, ganador, fase, numPartido) {
+    // Mapeo de bracket: qué partido sigue y en qué posición (L o V)
+    const bracket = {
+      // Dieciseisavos → Octavos
+      // Partido 1 (D16-1) ganador va a Octavos partido 1 como Local
+      dieciseisavos: {
+        1:  {sigFase:"octavos", sigPartido:1, pos:"L"},
+        2:  {sigFase:"octavos", sigPartido:1, pos:"V"},
+        3:  {sigFase:"octavos", sigPartido:2, pos:"L"},
+        4:  {sigFase:"octavos", sigPartido:2, pos:"V"},
+        5:  {sigFase:"octavos", sigPartido:3, pos:"L"},
+        6:  {sigFase:"octavos", sigPartido:3, pos:"V"},
+        7:  {sigFase:"octavos", sigPartido:4, pos:"L"},
+        8:  {sigFase:"octavos", sigPartido:4, pos:"V"},
+        9:  {sigFase:"octavos", sigPartido:5, pos:"L"},
+        10: {sigFase:"octavos", sigPartido:5, pos:"V"},
+        11: {sigFase:"octavos", sigPartido:6, pos:"L"},
+        12: {sigFase:"octavos", sigPartido:6, pos:"V"},
+        13: {sigFase:"octavos", sigPartido:7, pos:"L"},
+        14: {sigFase:"octavos", sigPartido:7, pos:"V"},
+        15: {sigFase:"octavos", sigPartido:8, pos:"L"},
+        16: {sigFase:"octavos", sigPartido:8, pos:"V"},
+      },
+      // Octavos → Cuartos
+      octavos: {
+        1: {sigFase:"cuartos", sigPartido:1, pos:"L"},
+        2: {sigFase:"cuartos", sigPartido:1, pos:"V"},
+        3: {sigFase:"cuartos", sigPartido:2, pos:"L"},
+        4: {sigFase:"cuartos", sigPartido:2, pos:"V"},
+        5: {sigFase:"cuartos", sigPartido:3, pos:"L"},
+        6: {sigFase:"cuartos", sigPartido:3, pos:"V"},
+        7: {sigFase:"cuartos", sigPartido:4, pos:"L"},
+        8: {sigFase:"cuartos", sigPartido:4, pos:"V"},
+      },
+      // Cuartos → Semifinales
+      cuartos: {
+        1: {sigFase:"semifinales", sigPartido:1, pos:"L"},
+        2: {sigFase:"semifinales", sigPartido:1, pos:"V"},
+        3: {sigFase:"semifinales", sigPartido:2, pos:"L"},
+        4: {sigFase:"semifinales", sigPartido:2, pos:"V"},
+      },
+      // Semifinales → Final y Tercer Puesto
+      semifinales: {
+        1: [{sigFase:"final", sigPartido:1, pos:"L"}, {sigFase:"tercerPuesto", sigPartido:1, pos:"L"}],
+        2: [{sigFase:"final", sigPartido:1, pos:"V"}, {sigFase:"tercerPuesto", sigPartido:1, pos:"V"}],
+      },
+    };
+
+    const sig = bracket[fase]?.[numPartido];
+    if (!sig) return;
+
+    const destinos = Array.isArray(sig) ? sig : [sig];
+    destinos.forEach(dest => {
+      // Solo propagar ganador a la Final; para tercer puesto propagar el PERDEDOR
+      let equipoFinal = ganador;
+      if (dest.sigFase === "tercerPuesto") {
+        // El que va al tercer puesto es el perdedor de semifinal
+        const partido = partsTodos.find(p=>p.fase===fase&&p.partido===numPartido);
+        if (partido) {
+          equipoFinal = dest.pos==="L" ? partido.local : partido.visitante;
+          // El perdedor es el que NO es el ganador
+          if (equipoFinal === ganador) {
+            equipoFinal = equipoFinal === partido.local ? partido.visitante : partido.local;
+          }
+        }
+      }
+      // Encontrar el partido destino y actualizar su equipo
+      const partDest = partsTodos.find(p=>p.fase===dest.sigFase&&p.partido===dest.sigPartido);
+      if (partDest) {
+        const ladoKey = dest.pos==="L" ? `${partDest.id}_L` : `${partDest.id}_V`;
+        FB.set(`eqElim/${ladoKey}`, equipoFinal);
+      }
+    });
   }
 
   function asignarEq(pid, lado, eq) {
@@ -530,7 +629,8 @@ function App() {
       guardarPron={guardarPron} results={results} guardarRes={guardarRes}
       cfg={cfg} setCfg={guardarCfg} esp={esp} setEsp={guardarEsp}
       tabla={calcTabla()} puedePron={puedePron}
-      eqElim={eqElim} asignarEq={asignarEq} onSalir={salir}/>
+      eqElim={eqElim} asignarEq={asignarEq} onSalir={salir}
+      borrarPronsJugador={borrarPronsJugador}/>
   );
 }
 
@@ -793,7 +893,7 @@ function Principal(props) {
         {tab==="res"    && esAdmin && <TabRes {...props}/>}
         {tab==="llaves" && esAdmin && <TabLlaves {...props}/>}
         {tab==="cfg"    && esAdmin && <TabCfg cfg={props.cfg} setCfg={props.setCfg}/>}
-        {tab==="users"  && esAdmin && <TabUsers usuarios={props.tabla}/>}
+        {tab==="users"  && esAdmin && <TabUsers usuarios={props.tabla} onBorrarProns={props.borrarPronsJugador}/>}
       </div>
     </div>
   );
@@ -1011,7 +1111,7 @@ function TablaGrupo({grupo, partidos, resultados}) {
 // ══════════════════════════════════════════════
 // TAB PRONÓSTICOS
 // ══════════════════════════════════════════════
-function TabProns({user,partidos,prons,results,guardarPron,puedePron,cfg}) {
+function TabProns({user,partidos,prons,results,guardarPron,puedePron,cfg,esAdmin}) {
   const [fase,setFase]=useState("grupos");
   const [grupo,setGrupo]=useState("A");
   const fases=["grupos","dieciseisavos","octavos","cuartos","semifinales","tercerPuesto","final"];
@@ -1074,7 +1174,8 @@ function TabProns({user,partidos,prons,results,guardarPron,puedePron,cfg}) {
             <TarjetaPron key={p.id} partido={p}
               pron={prons[`${user.email.replace(/\./g,'_').replace(/@/g,'__AT__')}_${p.id}`]}
               res={results[p.id]}
-              puedo={puedePron(p)}
+              puedo={puedePron(p)&&!esAdmin}
+              soloLectura={esAdmin}
               onGuardar={d=>guardarPron(p.id,d)}
               cfg={cfg}/>
           ))
@@ -1084,7 +1185,7 @@ function TabProns({user,partidos,prons,results,guardarPron,puedePron,cfg}) {
   );
 }
 
-function TarjetaPron({partido,pron,res,puedo,onGuardar,cfg}) {
+function TarjetaPron({partido,pron,res,puedo,onGuardar,cfg,soloLectura=false}) {
   const [gl,setGl]=useState(pron?.gl??"");
   const [gv,setGv]=useState(pron?.gv??"");
   const [glET,setGlET]=useState(pron?.glET??"");
@@ -1118,7 +1219,7 @@ function TarjetaPron({partido,pron,res,puedo,onGuardar,cfg}) {
     setTimeout(()=>setOk(false),2200);
   }
 
-  const mostrar=puedo&&(!hasPron||edit);
+  const mostrar=puedo&&(!hasPron||edit)&&!soloLectura;
   const acento=hayRes?"rgba(45,168,84,0.35)":hasPron?"rgba(232,160,32,0.28)":"var(--border)";
   const barraColor=hayRes?"var(--green2)":hasPron?"var(--gold)":"var(--border)";
 
@@ -1179,16 +1280,13 @@ function TarjetaPron({partido,pron,res,puedo,onGuardar,cfg}) {
           <div style={{fontSize:11,color:"var(--gold)",fontWeight:700,letterSpacing:0.5,marginBottom:10}}>
             ⏱ ELIMINATORIA — RESULTADO FINAL (incluyendo tiempo extra si lo hay)
           </div>
-          <div style={{display:"flex",alignItems:"center",gap:6,justifyContent:"center",marginBottom:4}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,justifyContent:"center",marginBottom:12}}>
             <NumIn value={glET} onChange={setGlET} style={{fontSize:18}}/>
             <span style={{color:"var(--muted)",fontWeight:700}}>–</span>
             <NumIn value={gvET} onChange={setGvET} style={{fontSize:18}}/>
           </div>
-          <div style={{fontSize:10,color:"var(--muted)",textAlign:"center",marginBottom:12}}>
-            Si el partido termina en 90 min, pon el mismo marcador de arriba
-          </div>
           <div style={{fontSize:11,color:"#e74c3c",fontWeight:700,letterSpacing:0.5,marginBottom:8}}>
-            🏆 ¿QUIÉN AVANZA? (puede ser por goles, tiempo extra o penaltis)
+            🏆 ¿QUIÉN AVANZA? (puede ser en los 90 minutos, tiempo extra o penaltis)
           </div>
           <div style={{display:"flex",gap:8}}>
             {[eqL,eqV].map(eq=>(
@@ -1203,11 +1301,23 @@ function TarjetaPron({partido,pron,res,puedo,onGuardar,cfg}) {
         </div>
       )}
 
-      {/* Resultado oficial eliminatoria */}
+      {/* Resultado oficial eliminatoria — siempre visible como referencia */}
       {hayRes&&esElim&&(
-        <div style={{marginTop:10,background:"var(--bg3)",borderRadius:8,padding:"9px 12px",fontSize:13}}>
-          {res.glET!==undefined&&<span style={{color:"var(--muted)"}}>T. Extra: <b style={{color:"var(--green2)",fontFamily:"'Bebas Neue'",fontSize:16}}>{res.glET}–{res.gvET}</b> · </span>}
-          {res.ganadorFinal&&<span style={{color:"var(--muted)"}}>Avanza: <b style={{color:"var(--green2)"}}><Flag p={res.ganadorFinal==="L"?eqL:eqV} sz={13}/> {res.ganadorFinal==="L"?eqL:eqV}</b></span>}
+        <div style={{marginTop:8,padding:"6px 10px",background:"rgba(45,168,84,0.08)",
+          border:"1px solid rgba(45,168,84,0.25)",borderRadius:7}}>
+          <div style={{fontSize:8,color:"var(--green2)",letterSpacing:0.5,marginBottom:3,fontWeight:700}}>RESULTADO OFICIAL</div>
+          <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+            {res.glET!==undefined&&(
+              <span style={{fontSize:12,color:"var(--green2)"}}>
+                Final: <b style={{fontFamily:"'Bebas Neue'",fontSize:16}}>{res.glET}–{res.gvET}</b>
+              </span>
+            )}
+            {res.ganadorFinal&&(
+              <span style={{fontSize:12,color:"var(--green2)"}}>
+                Avanza: <b><Flag p={res.ganadorFinal==="L"?eqL:eqV} sz={13}/> {res.ganadorFinal==="L"?eqL:eqV}</b>
+              </span>
+            )}
+          </div>
         </div>
       )}
 
@@ -1220,7 +1330,7 @@ function TarjetaPron({partido,pron,res,puedo,onGuardar,cfg}) {
       )}
 
       {/* Acciones */}
-      {!hayRes&&(
+      {!hayRes&&!soloLectura&&(
         <div style={{marginTop:11,display:"flex",gap:8,justifyContent:"flex-end",alignItems:"center"}}>
           {hasPron&&!edit&&puedo&&(
             <BtnSec onClick={()=>setEdit(true)} style={{fontSize:12,padding:"6px 13px"}}>Editar</BtnSec>
@@ -1233,6 +1343,12 @@ function TarjetaPron({partido,pron,res,puedo,onGuardar,cfg}) {
           {!puedo&&!hayRes&&(
             <span style={{fontSize:11,color:"var(--red)"}}>⏰ Tiempo cerrado</span>
           )}
+        </div>
+      )}
+      {!hayRes&&soloLectura&&(
+        <div style={{marginTop:8,padding:"5px 10px",background:"rgba(232,160,32,0.07)",
+          borderRadius:7,textAlign:"center"}}>
+          <span style={{fontSize:11,color:"var(--muted)"}}>👁 Vista de administrador — solo lectura</span>
         </div>
       )}
     </div>
@@ -1624,29 +1740,72 @@ function TabCfg({cfg,setCfg}) {
 // ══════════════════════════════════════════════
 // TAB USUARIOS (ADMIN)
 // ══════════════════════════════════════════════
-function TabUsers({usuarios}) {
+function TabUsers({usuarios, onBorrarProns}) {
+  const [confirmando, setConfirmando] = useState(null);
+  const [ok, setOk] = useState(null);
+
+  function borrar(u) {
+    setConfirmando(u.email);
+  }
+  function confirmarBorrar(email) {
+    onBorrarProns(email);
+    setConfirmando(null);
+    setOk(email);
+    setTimeout(()=>setOk(null), 3000);
+  }
+
   return (
     <div>
       <Titulo>Participantes Registrados</Titulo>
-      <p style={{color:"var(--muted)",fontSize:13,marginBottom:18}}>
+      <p style={{color:"var(--muted)",fontSize:13,marginBottom:6}}>
         {usuarios.length} participante{usuarios.length!==1?"s":""} registrado{usuarios.length!==1?"s":""}
       </p>
+      <div style={{background:"rgba(231,76,60,0.08)",border:"1px solid rgba(231,76,60,0.2)",
+        borderRadius:8,padding:"8px 12px",marginBottom:16,fontSize:12,color:"var(--muted)"}}>
+        ⚠️ Desde aquí puedes borrar los pronósticos de un jugador específico si es necesario para pruebas o correcciones.
+      </div>
       <div style={{display:"flex",flexDirection:"column",gap:8}}>
         {usuarios.map((u,i)=>(
           <Card key={u.email}>
             <div style={{display:"flex",alignItems:"center",gap:12}}>
-              <div style={{width:38,height:38,borderRadius:"50%",background:"var(--bg3)",
+              <div style={{width:36,height:36,borderRadius:"50%",background:"var(--bg3)",
                 display:"flex",alignItems:"center",justifyContent:"center",
-                fontFamily:"'Bebas Neue'",fontSize:18,color:"var(--muted)",flexShrink:0}}>
+                fontFamily:"'Bebas Neue'",fontSize:16,color:"var(--muted)",flexShrink:0}}>
                 {i+1}
               </div>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{fontSize:14,fontWeight:600,color:"var(--text)"}}>{u.nombre}</div>
                 <div style={{fontSize:11,color:"var(--muted)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{u.email}</div>
+                {ok===u.email&&<div style={{fontSize:11,color:"var(--green2)",marginTop:2}}>✓ Pronósticos borrados</div>}
               </div>
-              <div style={{textAlign:"right",flexShrink:0}}>
-                <div style={{fontFamily:"'Bebas Neue'",fontSize:24,color:"var(--gold)"}}>{u.pts}</div>
-                <div style={{fontSize:9,color:"var(--muted)",letterSpacing:1}}>PTS</div>
+              <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontFamily:"'Bebas Neue'",fontSize:22,color:"var(--gold)"}}>{u.pts}</div>
+                  <div style={{fontSize:9,color:"var(--muted)",letterSpacing:1}}>PTS</div>
+                </div>
+                {confirmando===u.email?(
+                  <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"center"}}>
+                    <div style={{fontSize:10,color:"#e74c3c",textAlign:"center"}}>¿Confirmar?</div>
+                    <div style={{display:"flex",gap:4}}>
+                      <button onClick={()=>confirmarBorrar(u.email)}
+                        style={{background:"rgba(231,76,60,0.2)",border:"1px solid #e74c3c",
+                          borderRadius:6,padding:"3px 8px",color:"#e74c3c",fontSize:11,fontWeight:700}}>
+                        Sí
+                      </button>
+                      <button onClick={()=>setConfirmando(null)}
+                        style={{background:"var(--bg3)",border:"1px solid var(--border)",
+                          borderRadius:6,padding:"3px 8px",color:"var(--muted)",fontSize:11}}>
+                        No
+                      </button>
+                    </div>
+                  </div>
+                ):(
+                  <button onClick={()=>borrar(u)}
+                    style={{background:"rgba(231,76,60,0.1)",border:"1px solid rgba(231,76,60,0.3)",
+                      borderRadius:7,padding:"5px 9px",color:"#e74c3c",fontSize:11,fontWeight:600}}>
+                    🗑 Borrar pronósticos
+                  </button>
+                )}
               </div>
             </div>
           </Card>
